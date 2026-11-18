@@ -1,49 +1,68 @@
-# Architecture Explorer — Concept and Technical Design Draft
+# yggdra — Concept and Technical Design
 
-> **Status:** Concept / early design (not yet implemented)  
-> **Working name:** Architecture Explorer / `archview` (not finalized)  
-> **Initial target:** Structural analysis and interactive 3D exploration of Go projects  
-> **Primary technologies:** Odin, raylib, Go  
-> **Guiding principles:** Web-independent, local-first, static analysis, SSOT, extensible analyzer plugins
+> **Status:** Design only; nothing is implemented yet. Decisions below are settled for the MVP unless listed as open in §12.  
+> **Name:** `yggdra` (project and CLI)  
+> **Initial target:** Structural analysis and interactive exploration of Go projects, on Linux  
+> **Technologies:** Odin, raylib, Dear ImGui, Go  
+> **Guiding principles:** Web-independent, local-first, static analysis, SSOT, analyzers as separate processes
 
 ## 1. Background and Goals
 
 As AI coding agents take on an increasing share of the implementation work in large software products, it becomes harder for humans to understand the overall code structure, dependencies, and impact of changes.
 
-Conventional file trees, code search, and 2D dependency graphs make it difficult to combine a high-level overview with detailed exploration. This project aims to build **a native tool that extracts structure from source code and presents it in an interactive 3D space (with 2D/2.5D views where appropriate), allowing humans to explore, understand, and audit software systems**.
+Conventional file trees, code search, and flat dependency graphs make it difficult to combine a high-level overview with detailed exploration. This project aims to build **a native tool that extracts structure from source code and presents it in an interactive spatial view, allowing humans to explore, understand, and audit software systems**.
 
 ### Intended Value
 
-- Explore a project at multiple levels of granularity, including packages, types, functions, and calls.
-- Select a node to follow incoming and outgoing dependencies, references, and the underlying source evidence.
+- Explore a project at multiple levels of granularity: packages, types, functions, and calls.
+- Select a node to follow incoming and outgoing dependencies and the source evidence behind them.
 - Help humans understand and review the structure of implementations created or modified by AI coding agents.
-- Eventually support commit-to-commit comparisons, architecture constraint checks, and continuous analysis in CI/CD.
-- Keep both analysis and exploration local, without requiring a particular web service or browser.
+- Eventually support commit-to-commit comparisons, architecture constraint checks, and analysis in CI.
+- Keep both analysis and exploration local, without requiring a web service or browser.
+
+Auditing a change means comparing the snapshots of two commits. Comparison itself is a later phase, but it only works if node identities are stable and output is deterministic, so both are MVP requirements (§6).
 
 ### Source of Truth (SSOT)
 
-**Source code and related definition files are the single source of truth.** The generated graph is not authoritative: it is derived data or an analysis snapshot that can be regenerated. Relationships shown in the viewer should retain links to their source definitions wherever possible.
+**Source code and related definition files are the single source of truth.** The generated graph is derived data that can be regenerated. Every relationship shown in the viewer keeps a link to the source location that supports it.
 
-## 2. Initial Scope and Non-Goals
+## 2. MVP Scope and Non-Goals
 
 ### MVP Scope
 
-1. Select a Go project for analysis.
-2. Extract packages, import dependencies, and definitions of types, functions, and methods.
-3. Extract direct function calls where feasible.
-4. Convert the results to a common graph model.
-5. Render the graph in a native Odin GUI with 3D orbit, pan, and zoom controls.
+1. Analyze one Go module under one build configuration.
+2. Extract packages, import dependencies, and declarations of types, functions, and methods.
+3. Extract calls that the type checker resolves, and record calls it cannot resolve without guessing their targets.
+4. Emit the result as a deterministic snapshot in the common graph format.
+5. Render the graph in a native Odin viewer with camera controls.
 6. Support node selection, search, dependency highlighting, and source-location inspection.
-7. Save analysis results and reopen them later.
+7. Save snapshots and reopen them later.
 
-### Out of Scope Initially
+### Not in the MVP
 
-- Analysis of OpenAPI, Terraform, CloudFormation, Kubernetes, and similar formats (possible future plugins).
-- Uniform, high-precision analysis of every programming language.
-- Definitive reconstruction of all runtime execution paths, including dynamic dispatch and reflection.
-- Advanced database/ORM analysis and runtime-trace integration.
-- SaaS, cloud synchronization, or an architecture that requires a browser or web server.
-- Designing a complete, generic Plugin SDK before a working analyzer exists.
+**Analysis**
+
+- Other languages and formats (OpenAPI, Terraform, CloudFormation, Kubernetes, ...).
+- SSA and call-graph algorithms (CHA/RTA/VTA), candidate callees for interface calls, and `implements` or `references` edges.
+- Test files (`_test.go`), several build configurations in one snapshot, and multi-module workspaces.
+- Incremental analysis, file watching, caches, and databases.
+- Runtime traces.
+
+**Integration**
+
+- A generic plugin SDK, plugin discovery or registration, bidirectional RPC, and binary protocols.
+
+**Viewer**
+
+- Force-directed layout, animation, and visual polish.
+- An in-app source viewer and editor integration (a path and line number are enough).
+- Windows and macOS builds.
+- A renderer abstraction layer (confining raylib imports to two packages is enough, see §3).
+
+**Product**
+
+- SaaS, cloud synchronization, or anything that requires a browser or web server.
+- Snapshot diffs, CI checks, and architecture rules (Phase 5; the contract is prepared for them).
 
 ## 3. High-Level Architecture
 
@@ -51,354 +70,468 @@ Conventional file trees, code search, and 2D dependency graphs make it difficult
        Go source repository (SSOT)
                   |
                   v
-          Go Analyzer Plugin
+             Go Analyzer
        (standalone Go process)
-          AST / types / packages
+        go/packages + go/types
                   |
-                  | Local IPC (initial proposal:
-                  | stdio + JSON Lines)
+                  | stdout: JSON Lines, one-way
+                  | (same format as a saved snapshot)
                   v
       +-----------------------------+
-      |          Odin Core          |
+      |     Odin Core (headless)    |
       |                             |
-      |  Plugin Host                |
-      |  Graph Model / Index        |
-      |  Query / Filter / Layout    |
-      |  Snapshot I/O               |
-      |                             |
+      |  plugin    process control  |
+      |  snapshot  read / write     |
+      |  graph     validate, index, |
+      |            query, aggregate |
+      |  layout    deterministic    |
+      |            placement        |
       +--------------+--------------+
                      |
                      v
       +-----------------------------+
       |     Native Desktop Viewer   |
       |                             |
-      |  raylib: window / 3D        |
-      |  ImGui: panels / controls    |
-      |  picking / camera / LOD     |
+      |  renderer  raylib: 3D,      |
+      |            camera, picking  |
+      |  ui        Dear ImGui:      |
+      |            panels, search   |
       +--------------+--------------+
                      |
                      v
             OS + GPU / driver
-          Linux / Windows / macOS
 ```
 
-**Separation of responsibilities:**
-
-| Component | Responsibility | Proposed Implementation |
+| Component | Responsibility | Implementation |
 | --- | --- | --- |
-| Odin Core | Plugin lifecycle, graph storage/integration/search, snapshots, layout orchestration | Odin |
-| Go Analyzer | Go-specific syntax, type, and dependency analysis | Go |
-| Graph Model | Language-independent nodes, edges, and provenance | Versioned JSON schema |
-| 3D Renderer | Graph rendering, camera navigation, hit testing | Odin + raylib |
-| Desktop UI | Project tree, search, detail panels, display controls | Dear ImGui (integration to be validated in a PoC) |
-| Layout | Hierarchical placement, clustering, overlap reduction | Start with a simple custom approach; evaluate Graphviz or others later |
+| Go Analyzer | Go-specific loading, type checking, and extraction | Go |
+| Graph contract | Language-independent nodes, edges, and evidence | Versioned JSON Lines records (§6) |
+| `plugin` | Start the analyzer, enforce limits, collect its output | Odin (`core:os` process API) |
+| `snapshot` | Read and write the record stream | Odin |
+| `graph` | Validation, indexes, queries, aggregation for collapsed groups | Odin |
+| `layout` | Deterministic placement from graph and view state | Odin |
+| `renderer` | Drawing, camera navigation, hit testing | Odin + raylib |
+| `ui` | Project tree, search, detail panels, display controls | Odin + Dear ImGui |
+
+**Dependency rule:** `plugin`, `snapshot`, `graph`, and `layout` are headless and must not import raylib or ImGui. Only `renderer` and `ui` may. This keeps the headless packages testable without a display and makes the rendering layer replaceable.
 
 ### Why Odin for the Core?
 
-- Learning and using Odin is itself part of the motivation for this project.
-- It provides fine-grained control over native rendering and memory management.
-- Its data-oriented design fits graph representations, array processing, cameras, and matrix operations.
-- It does not require a browser, Electron, or a Node.js runtime.
+- Learning and using Odin is part of the motivation for this project.
+- It gives direct control over native rendering and memory.
+- Its data-oriented style fits graph storage, array processing, and camera math.
+- It needs no browser, Electron, or Node.js runtime.
 
-However, **language-specific analysis should not be forced into Odin**. Go already provides mature AST and type-analysis facilities, so implementing the Go analyzer in Go is more practical.
+Known costs: Odin has no stable 1.0 release and no package manager, and its Dear ImGui bindings are third-party (§8). They are contained by pinning the toolchain (§11) and by the process boundary: the Go analyzer and the graph contract do not depend on the viewer's language, so a failed viewer experiment costs only the viewer.
 
-## 4. Runtime and User Experience
+**Language-specific analysis stays out of Odin.** Go's own loader and type checker are the practical way to analyze Go.
 
-Build the Odin Core as a **native executable** that runs directly on the operating system. raylib handles window creation and GPU rendering; Dear ImGui or an equivalent library provides search and detail panels. A JVM, Node.js, web browser, and HTTP server are not required.
+## 4. Runtime and CLI
 
-- **Linux:** Runs as an ELF executable with the necessary shared libraries and graphics drivers.
-- **Windows:** Runs as an `.exe`.
-- **macOS:** A possible future target; build tooling and graphics backends need validation.
-- **NixOS / KDE Plasma:** A strong candidate for the initial test environment. Consider Flakes for build and dependency management, and verify Wayland/X11 compatibility.
+The Odin core is a native executable. The Go analyzer is a second executable, started by the core as a child process. No JVM, Node.js, browser, or HTTP server is involved.
 
-Initially, the Odin native executable and the Go analyzer plugin are **separate processes / separate executables**. Even without a language-level runtime, OS, GPU, and library dependencies remain.
+The MVP targets Linux only. NixOS with KDE Plasma is the first test environment, under both Wayland and X11. Other platforms are not built or tested, but the headless packages should not take Linux-only shortcuts where a portable call costs the same.
 
-### Proposed CLI (Tentative)
+### Proposed CLI (not implemented)
 
 ```bash
-# Analyze a project and open the GUI
-archview open ./my-go-project
+# Analyze a module and open the viewer
+yggdra open ./my-go-project
 
-# Analyze and save only (CI or batch use)
-archview scan ./my-go-project --output graph.json
+# Analyze and save only
+yggdra scan ./my-go-project --output graph.jsonl
 
 # Inspect an existing snapshot offline
-archview view graph.json
+yggdra view graph.jsonl
 ```
 
-Users should eventually be able to open a repository either from the GUI or by supplying a CLI path. Both the `archview` name and the command syntax are placeholders.
+The core locates the Go analyzer next to its own executable or through an explicit flag. It does not search `PATH` or configuration directories.
 
-## 5. Plugin Architecture
+## 5. Analyzer Integration
 
-### Design Principles
+### Principles
 
-- Use **out-of-process plugins**. Do not initially load analyzers as shared libraries into the Odin process.
-- Implement the Go plugin in Go; future TypeScript, Java, Python, and other plugins can use the most suitable tooling for their language.
-- Plugins describe the **meaning** of the extracted structure. They should not prescribe colors, 3D coordinates, or other presentation details.
-- Reconcile language-specific differences through a **common graph schema**, rather than forcing all analyzers into a single implementation language.
-- Isolate plugin crashes and hangs from the host, and handle timeouts, exit codes, and standard error.
+- Analyzers run **out of process**. They are never loaded into the Odin process as shared libraries.
+- Each analyzer is written in whatever language has the best tooling for its target.
+- Analyzers describe **meaning**. They never emit colors, coordinates, or other presentation data.
+- Language differences are reconciled through the common graph contract.
+- Analyzer output is untrusted input: the core validates all of it (§6).
 
-### Initial Protocol
+### Protocol v0
 
-The initial proposal is **standard input/output + JSON Lines (JSONL)**. Candidate message types include `hello`, `analyze`, `node`, `edge`, `diagnostic`, and `complete`.
+The analyzer is a one-shot command. There is no handshake and no request channel.
 
 ```text
-Odin Core                     Go Analyzer
-    |                             |
-    +-- start process ----------->|
-    +-- analyze(project) -------->|
-    |<-------- nodes / edges -----+
-    |<-------- diagnostics -------+
-    |<-------- complete ----------+
-    +-- build/render graph        |
+Odin Core                                Go Analyzer
+    |                                        |
+    +-- start: <analyzer> [flags] <dir> ---->|
+    |<------- stdout: header ----------------+
+    |<------- stdout: node, edge, ... -------+
+    |<------- stdout: diagnostic ... --------+
+    |<------- stdout: complete --------------+
+    |<------- exit code 0 -------------------+
 ```
 
-JSON Lines makes streaming large results and debugging straightforward. If very large outputs later create performance problems, evaluate a binary format or incremental/delta transfer. Avoid overengineering the protocol in the first iteration.
+- **stdout** carries protocol records only, one JSON object per line.
+- **stderr** carries human-readable logs only.
+- **stdin** is not used.
+- The stream starts with one `header` and ends with one `complete`. A stream without `complete` is truncated and is rejected.
+- A saved snapshot is this same record stream. There is one format, not an IPC format and a file format.
 
-### Security Considerations
+Because the analyzer needs nothing but arguments, it can be run and tested by hand without the core.
 
-Analysis targets may contain commercial or proprietary source code. **Do not execute arbitrary, untrusted plugins without controls.** Launch only approved plugins and constrain working directories, inputs, and execution time. Go package loading can be affected by build environment settings and external dependency resolution, so requirements for an offline analysis mode should be investigated.
+### Host Responsibilities
 
-> Running a plugin in a separate process improves fault isolation; it is **not** an operating-system sandbox. Network and filesystem restrictions require additional controls.
+- Enforce a timeout and kill the analyzer when it expires.
+- Read stdout and stderr concurrently, so that a full pipe cannot block the analyzer.
+- Never block the UI thread on analysis.
+- Enforce limits on line length, record count, and total size.
+- Treat a non-zero exit code, a timeout, or a truncated stream as a failed analysis. A failed analysis produces no snapshot.
 
-## 6. Common Graph Model
+### Security
 
-Before building a sophisticated rendering engine, define the data contract for **what the graph represents and what evidence supports each relationship**.
+Analysis targets may contain proprietary source code and may themselves be untrusted.
 
-### Minimum Elements
+- Only the bundled analyzer is started. There is no mechanism for running third-party analyzers.
+- The analyzer must not reach the network or execute code from the analyzed repository. The Go-specific defaults that enforce this are in §7.
 
-- **Node:** Package, file, type, function, method, etc.
-- **Edge:** Relations such as `imports`, `declares`, `calls`, and `references`.
-- **Source Location:** File, line/column, and optionally the full definition range.
-- **Evidence / Confidence:** Distinguish directly established relationships from conservative estimates or candidate relationships.
-- **Analysis Context:** Language, analyzer version, repository commit, Go build tags, GOOS/GOARCH, etc.
+> A separate process gives fault isolation; it is **not** an operating-system sandbox. Filesystem and network confinement would need additional controls.
 
-Illustrative data example (not a finalized schema):
+## 6. Graph Contract v0
 
-```json
-{
-  "schema_version": 1,
-  "analysis": {
-    "language": "go",
-    "revision": "<git-commit-sha>",
-    "goos": "linux",
-    "goarch": "amd64"
-  },
-  "nodes": [
-    {
-      "id": "go:example.com/app/handler:GetUser",
-      "kind": "function",
-      "name": "GetUser",
-      "source": { "file": "handler/user.go", "line": 42 }
-    },
-    {
-      "id": "go:example.com/app/service:FindUser",
-      "kind": "function",
-      "name": "FindUser",
-      "source": { "file": "service/user.go", "line": 18 }
-    }
-  ],
-  "edges": [
-    {
-      "source": "go:example.com/app/handler:GetUser",
-      "target": "go:example.com/app/service:FindUser",
-      "kind": "calls",
-      "resolution": "static",
-      "evidence": { "file": "handler/user.go", "line": 43 }
-    }
-  ]
-}
+`schema_version` is `0`: experimental, with no compatibility promise. Readers reject every version they do not know. While the version is `0`, any change to the contract updates the analyzer, the core, the fixtures, and the tests in the same change. The version becomes `1` when compatibility is first promised.
+
+### Records
+
+| Record | Purpose |
+| --- | --- |
+| `header` | First record. Schema version, analyzer name and version, analysis context. |
+| `node` | A package, type, interface, function, or method. |
+| `edge` | A relationship between two nodes, with evidence. |
+| `diagnostic` | Something the analyzer could not load or type-check. |
+| `complete` | Last record. Record counts, used to detect truncation. |
+
+### Nodes
+
+- `kind` is one of `package`, `type`, `interface`, `function`, `method`. `interface` is separate from `type` because calls to its methods do not identify the code that runs.
+- `parent` forms a single **containment tree**: package → type or function, type → method. Packages have no parent.
+- Files are not nodes. Every declaration carries its file in `loc`, and the viewer can group by file from that.
+- Grouping packages by directory is derived in the core from their paths; analyzers do not emit it.
+- `external: true` marks a node outside the analyzed module (§7).
+
+### Edges
+
+- `kind` is `imports` (package → package) or `calls` (function or method → function or method).
+- An edge is identified by (`kind`, `source`, `target`). Repeated occurrences are merged into one edge whose `sites` list every supporting location. Duplicate edges are invalid.
+- Every edge has at least one site.
+- Edges between collapsed groups are **derived in the core** from the edges of their descendants. Analyzers never emit aggregates.
+
+### Certainty
+
+Every edge carries one of three values. There are no numeric confidence scores.
+
+| Value | Meaning | Emitted in the MVP |
+| --- | --- | --- |
+| `established` | A fact of the source under the recorded build configuration, proven by the type checker. | Yes |
+| `unresolved` | The relationship exists, but its target cannot be named. The edge has no `target`. | Yes |
+| `inferred` | Produced by an approximation, such as a candidate implementation of an interface method. | No (reserved) |
+
+Evidence observed at run time, if ever added, gets its own value. It is never folded into these.
+
+### Identity
+
+Node IDs are stable across commits as long as the declaration keeps its package, receiver, and name.
+
+| Node | ID |
+| --- | --- |
+| Package | `go:<import path>` |
+| Type, interface, function | `go:<import path>#<Name>` |
+| Method | `go:<import path>#<Type>.<Method>` |
+
+- IDs never contain line numbers, file paths of ordinary declarations, or build configuration.
+- Generic declarations use the uninstantiated declaration.
+- Methods use the type that declares them, including methods reached through embedding.
+- `init` functions are the exception to the file-path rule, because a package may have several: `go:<import path>#init@<file name>`, with an ordinal suffix when one file has more than one.
+- Declarations named `_`, types declared inside functions, and function literals are not nodes. Calls made inside a function literal belong to the enclosing declaration.
+- Duplicate IDs are invalid, so a flaw in this scheme fails loudly rather than silently merging nodes.
+
+### Locations
+
+- `file` is relative to the analyzed root directory, uses `/`, and contains no `..`. Snapshots never contain absolute paths.
+- `line` and `col` are 1-based. `col` counts bytes, as `go/token` does.
+- External nodes have no `loc`: their files live outside the root, at machine-specific paths.
+
+### Determinism
+
+The same input and configuration produce byte-identical output.
+
+- Nodes are sorted by `id`. Edges are sorted by (`source`, `kind`, `target`), with absent targets first. Sites are sorted by (`file`, `line`, `col`). All comparisons are bytewise.
+- Snapshots contain no timestamps, host names, or absolute paths.
+- A VCS revision is optional, and must not be recorded for a working tree that does not match it.
+
+### Illustrative Example
+
+```jsonl
+{"type":"header","schema_version":0,"analyzer":{"name":"go","version":"0.0.0"},"context":{"module":"example.com/app","goos":"linux","goarch":"amd64","cgo_enabled":false,"build_tags":[]}}
+{"type":"node","id":"go:example.com/app/handler","kind":"package","name":"handler"}
+{"type":"node","id":"go:example.com/app/handler#GetUser","kind":"function","name":"GetUser","parent":"go:example.com/app/handler","loc":{"file":"handler/user.go","line":42,"col":6}}
+{"type":"node","id":"go:example.com/app/service","kind":"package","name":"service"}
+{"type":"node","id":"go:example.com/app/service#Store","kind":"interface","name":"Store","parent":"go:example.com/app/service","loc":{"file":"service/store.go","line":9,"col":6}}
+{"type":"node","id":"go:example.com/app/service#Store.Find","kind":"method","name":"Find","parent":"go:example.com/app/service#Store","loc":{"file":"service/store.go","line":10,"col":2}}
+{"type":"node","id":"go:fmt","kind":"package","name":"fmt","external":true}
+{"type":"edge","kind":"imports","source":"go:example.com/app/handler","target":"go:example.com/app/service","certainty":"established","sites":[{"file":"handler/user.go","line":6,"col":2}]}
+{"type":"edge","kind":"calls","source":"go:example.com/app/handler#GetUser","certainty":"unresolved","sites":[{"file":"handler/user.go","line":51,"col":9}]}
+{"type":"edge","kind":"calls","source":"go:example.com/app/handler#GetUser","target":"go:example.com/app/service#Store.Find","certainty":"established","sites":[{"file":"handler/user.go","line":43,"col":14}]}
+{"type":"complete","nodes":6,"edges":3,"diagnostics":0}
 ```
 
-**Note:** The IDs above are for illustration only. The implementation needs stable, collision-resistant identifiers that account for receivers, type parameters, declaration locations, build constraints, and related factors. `resolution: static` is too coarse to express certainty adequately; the actual model should distinguish confirmed, possible, and inferred relationships.
+Field names and the exact field set are fixed in Phase 0, in a dedicated contract document.
+
+### Validation in the Core
+
+The core rejects a snapshot, naming the offending line, when it finds:
+
+- an unknown `schema_version`, a missing `header` or `complete`, or counts that do not match;
+- an unknown record type, kind, or certainty value;
+- a duplicate node ID or duplicate edge;
+- a `parent`, `source`, or `target` that names no node, or a cycle in `parent`;
+- an edge without `target` whose certainty is not `unresolved`, or the reverse;
+- an absolute path, a path containing `..`, or a record over the size limits.
+
+A snapshot that contains error diagnostics is valid, but the viewer must show that the analysis was incomplete.
 
 ### Core Responsibilities
 
-1. Validate nodes and edges and build indexes.
-2. Query incoming/outgoing dependencies and n-hop neighborhoods.
-3. Group and collapse elements, for example by package.
-4. Store provenance and analysis evidence for navigating back to the source.
-5. Save/load analysis results while leaving room for future graph diffs.
+1. Validate records and build indexes.
+2. Query incoming and outgoing dependencies and n-hop neighborhoods.
+3. Collapse and expand along the containment tree, deriving aggregated edges.
+4. Keep evidence reachable from every displayed relationship, including aggregates.
+5. Save and load snapshots.
 
-## 7. Go Analyzer Plugin
+## 7. Go Analyzer
 
-### Main Technologies
+### Technologies
 
-| Go Package / API | Primary Use |
+| Go Package / API | Use |
 | --- | --- |
-| `go/parser` / `go/ast` | Parsing and traversing ASTs |
-| `go/types` | Resolving types and identifiers |
-| `golang.org/x/tools/go/packages` | Loading Go modules/packages under the relevant build configuration |
-| `golang.org/x/tools/go/ssa` | More advanced analysis using SSA representations (later phase) |
-| `golang.org/x/tools/go/callgraph` | Call graphs and CHA/RTA-style analyses (later phase) |
+| `golang.org/x/tools/go/packages` | Loading the module's packages under one build configuration |
+| `go/types` | Resolving identifiers, callees, and method receivers |
+| `go/ast` / `go/token` | Traversing syntax and reporting positions |
 
-### What Static Analysis Can and Cannot Establish
+`go/ssa` and `go/callgraph` are not used in the MVP.
 
-| Analysis Target | Initial Expectation |
+### Loading Rules
+
+- Load the module that contains the given directory, with the pattern `./...`.
+- Use one build configuration per run: the host's `GOOS` and `GOARCH` and no extra build tags, unless flags say otherwise. The effective configuration is recorded in the header.
+- Exclude test files.
+- Run the `go` command with `GOPROXY=off`, `GOTOOLCHAIN=local`, and `CGO_ENABLED=0`. Only an explicit flag relaxes them, and the header records the effective values.
+  - `GOPROXY=off`: a dependency missing from the local module cache becomes a diagnostic, not a download.
+  - `GOTOOLCHAIN=local`: a `go.mod` that asks for another toolchain becomes a diagnostic, not a toolchain download.
+  - `CGO_ENABLED=0`: cgo and the C compiler are never invoked. Files that import `"C"` are excluded from the graph.
+- Type-check from source rather than from compiled export data, so that loading does not build dependencies. The exact `go/packages` mode is confirmed during implementation.
+- Load and type errors become `diagnostic` records with root-relative positions. The analyzer still emits everything it could establish.
+
+### Boundary of the Graph
+
+External code (the standard library and dependencies) is represented only as far as the analyzed module refers to it: external packages as import targets, and external functions, methods, and their containing types as call targets. **No edge starts at an external node**, and external declarations that nothing refers to are not emitted.
+
+### How Go Constructs Are Recorded
+
+| Source construct | Recorded as |
 | --- | --- |
-| Packages, files, and imports | Can generally be extracted with high accuracy |
-| Type, function, and method definitions | Can generally be extracted with high accuracy |
-| Direct function calls | Can be extracted with type information |
-| Calls through interfaces | Static analysis may yield multiple possible callees |
-| Function values, reflection, and dynamic registration | Exact resolution may be difficult or impossible |
-| Exact runtime paths and functions actually invoked | Cannot be guaranteed by static analysis alone |
+| Package import | `imports`, `established` |
+| Call to a declared function or a concrete method | `calls`, `established`, target is the declaration |
+| Call to an interface method | `calls`, `established`, target is the interface's method node; the implementation that runs is not identified |
+| Call through a function value (variable, field, parameter, returned function) | `calls`, `unresolved`, no target |
+| Call in a package-level initializer | Same as above, with the package as source |
+| Direct call of a function literal | Not an edge; the literal's body belongs to the enclosing declaration |
+| Conversions such as `T(x)` and built-ins such as `len` | Not calls; not recorded |
+| Reflection, dynamic registration, `go:linkname`, assembly | Not detected; not represented |
 
-**Design rule:** Never confuse a relationship that **may exist** with one that was **actually observed**. If runtime traces are integrated later, represent them as a separate category of evidence from static-analysis results.
+**Design rule:** Never confuse a relationship that **may exist** with one that was **established**. The viewer presents interface methods as abstract targets and unresolved calls as unresolved.
 
-## 8. 3D Viewer Requirements
+## 8. Viewer
 
-### Proposed Screen Layout
+### Screen Layout
 
 ```text
 +----------------------------------------------------------+
-| Architecture Explorer       [Search]  [Filters] [View]  |
+| yggdra                      [Search]  [Filters] [View]   |
 +----------------+---------------------------+-------------+
 | Project Tree   |                           | Details     |
-|                |       3D Graph View       |             |
+|                |        Graph View         |             |
 | Packages       |                           | Node info   |
-| Files          |   orbit / pan / zoom      | Edges       |
-| Types          |   select / highlight      | Source      |
-| Functions      |                           | Evidence    |
+| Types          |   orbit / pan / zoom      | Edges       |
+| Functions      |   select / highlight      | Certainty   |
+|                |                           | Sites       |
 +----------------+---------------------------+-------------+
-| status: analysis / node count / selected item            |
+| status: analysis / diagnostics / node count / selection  |
 +----------------------------------------------------------+
 ```
 
 ### Essential Interactions
 
-- Orbit, pan, and zoom the 3D camera.
+- Orbit, pan, and zoom the camera.
 - Select nodes and inspect their details.
-- Highlight incoming and outgoing dependencies using distinct colors.
-- Switch granularity between packages, types, and functions.
-- Search by keyword and move the camera focus to a match.
-- Show source file paths and line numbers (opening an editor can come later).
+- Highlight incoming and outgoing dependencies in distinct colors.
+- Expand and collapse along the containment tree.
+- Search by name and move the camera to a match.
+- Show the file path and line of every node and edge site.
 
-### Handling Large Graphs
+### Level of Detail
 
-Showing every node at once does not necessarily help humans understand a large codebase. Design for **level of detail (LOD)** from the beginning:
+Showing every node at once does not help anyone understand a large codebase. The view starts collapsed and reveals detail on demand:
 
-1. **Overview:** Show packages and subsystems.
-2. **Intermediate:** Expand types, functions, and dependencies within a selected package.
-3. **Detail:** Investigate references, calls, and provenance for an individual function or type.
+1. **Overview:** packages, grouped by directory, with import edges and aggregated call edges.
+2. **Intermediate:** the types and functions of an expanded package.
+3. **Detail:** the methods, calls, and sites of a selected declaration.
 
-Do not insist on pure 3D. Combine the spatial viewer with **2D/2.5D layouts and conventional detail panels**. The real goal is accurate, understandable exploration, not 3D rendering for its own sake.
+### Layout
 
-## 9. Recommended Implementation Sequence
+- Layout is a deterministic function of the graph and the view state (which groups are expanded). It uses no randomness and does not depend on input order.
+- The first layout follows the containment tree: nested regions on a plane, children inside their parent's region.
+- Force-directed layout is excluded. It gives a different picture on every run, which destroys the reader's mental map and contradicts deterministic output.
+- Positions and styling are never written to a snapshot.
 
-### Phase 0 — Scope and Contracts
+### 3D Is a Hypothesis
 
-- Define the minimum set of node and edge kinds for the MVP.
-- Create a provisional JSON snapshot format.
-- Prepare a small Go repository as a fixture for verification.
+3D node-link views suffer from occlusion and perspective distortion, and may be harder to read than 2D. The layout produces 3D coordinates, and a flat layout is the case where one axis is unused, so both run through the same code. Phase 1 compares a top-down 2D view with a 3D view on the same real data. If the third axis is kept, it carries exactly one meaning, chosen in that comparison. The goal is accurate, understandable exploration, not 3D for its own sake.
 
-### Phase 1 — Odin Core + Sample Graph
+### Rendering and UI Libraries
 
-- Open a native window using raylib.
-- Render nodes and edges from a fixed JSON file.
-- Implement camera controls, node selection, search, and related-node highlighting.
-- Verify operation on NixOS/KDE.
+Facts checked in November 2026 against Odin `dev-2026-11`:
 
-**Completion criterion:** A saved graph can be explored interactively without a Go analyzer plugin.
+- `vendor:raylib` binds raylib 6.2 and includes `rlgl` and `raygui`. It links the libraries bundled with the Odin distribution.
+- Dear ImGui is not in `vendor`. The third-party `odin-imgui` bindings cover GLFW, SDL2, SDL3, OpenGL 3, and other backends, but **not raylib**, and building them needs clang and Python.
+- `vendor:microui` and `raygui` exist, but do not cover the trees, tables, and text input this UI needs.
 
-### Phase 2 — Minimal Plugin Integration
+So raylib with ImGui requires a custom or community `rlgl` backend, and that integration is the first thing Phase 1 validates. If it proves fragile, the fallback is to keep ImGui and replace raylib with SDL3 or GLFW plus OpenGL, where ImGui backends already exist. The viewer's 3D needs are small: instanced shapes, lines, and text.
 
-- Launch and manage an external process.
-- Receive analysis results over stdio, handle errors, and support protocol versioning.
-- Use a stub plugin to test end-to-end host integration.
+## 9. Implementation Sequence
 
-**Completion criterion:** The GUI can display a graph emitted by an external CLI.
+### Phase 0 — Contract and Real Data
 
-### Phase 3 — Go Analyzer (First Production-Oriented Plugin)
+- Write the v0 contract document from §6.
+- Build a thin Go analyzer that emits packages and `imports` edges only, deterministically.
+- Add a small Go module as a fixture, with a golden snapshot, plus valid and invalid snapshot samples.
+- Generate snapshots of one or two real, mid-sized open-source Go projects for viewer evaluation. They are generated locally and not committed.
+- Pin the toolchains (§11).
 
-- Collect package metadata and import dependencies using `go/packages`.
-- Extract functions, methods, and types using AST and type information.
-- Identify explicit calls and attach source locations.
-- Emit `diagnostic` messages for locations that cannot be analyzed.
+**Completion criterion:** The analyzer reproduces the golden snapshot byte for byte, and a snapshot of a real project exists.
 
-**Completion criterion:** A real Go repository can be selected and explored structurally in 3D.
+Real data comes first because layout decisions made on a hand-written toy graph do not survive contact with a real one.
+
+### Phase 1 — Risk Spikes (time-boxed)
+
+- raylib + Dear ImGui in Odin on NixOS/KDE, under Wayland and X11: a window, a 3D scene, and one panel with a tree and a text input.
+- Load a real snapshot, apply the containment layout, and compare 2D with 3D.
+
+**Completion criterion:** Two decisions are recorded in this document: whether raylib stays, and whether the third axis stays and what it means.
+
+### Phase 2 — Core and Viewer on the Package Graph
+
+- Headless packages: snapshot reader and validator, graph indexes and queries, layout. Tested without a display.
+- Viewer: camera, picking, selection, search, highlighting, detail panel with sites.
+- Analyzer process management: start, concurrent pipe reading, timeout, exit code.
+- `open`, `scan`, and `view`.
+
+**Completion criterion:** `yggdra open <dir>` shows the package import graph of a real repository.
+
+### Phase 3 — Declarations and Calls
+
+- Extend the Go analyzer to types, interfaces, functions, methods, and `calls` edges with certainty.
+- Emit diagnostics for load and type errors.
+- Expand and collapse in the viewer, with aggregated edges derived in the core.
+
+**Completion criterion:** The MVP Definition of Done (§13).
 
 ### Phase 4 — Validation on Real Projects
 
-- Measure layout, rendering, and search performance on repositories with thousands of nodes or more.
-- Improve clustering, LOD, and filtering.
-- Validate the correctness of extracted and displayed relationships.
-- Stabilize only the plugin API surface that actual usage requires.
+- Measure layout, rendering (nodes, edge lines, labels), picking, and search on graphs of thousands of nodes or more. Optimize only what the measurements show.
+- Check extracted relationships against the source of real projects.
+- Promote the contract to `schema_version` 1 once compatibility is needed.
 
 ### Phase 5 — Future Extensions
 
-- Show structural differences between Git commits, including added and removed dependencies.
-- Run headless analysis in CI and generate snapshots.
-- Enforce machine-checkable architecture rules, such as layer boundaries and cycle detection.
-- Add analyzers for other languages (TypeScript, Java, Python, etc.).
-- Integrate OpenAPI, IaC, and runtime traces (all explicitly out of scope for now).
+- Structural differences between two commits.
+- Headless analysis in CI.
+- Machine-checkable architecture rules, such as layer boundaries and cycle detection.
+- `implements` edges and `inferred` candidate callees.
+- Analyzers for other languages; OpenAPI, IaC, and runtime traces.
 
 ## 10. Proposed Repository Layout
 
+Nothing here exists yet except `docs/`.
+
 ```text
-architecture-explorer/
-├── core/                     # Odin core
-│   ├── graph/                # Graph model and queries
-│   ├── plugin/               # Plugin process management
-│   ├── layout/               # Spatial layout and clustering
-│   ├── renderer/             # raylib rendering
-│   ├── ui/                   # Desktop UI
-│   └── snapshot/             # Save/load snapshots
+yggdra/
+├── core/                     # Odin
+│   ├── graph/                # Model, validation, indexes, queries   (headless)
+│   ├── snapshot/             # JSON Lines read/write                 (headless)
+│   ├── plugin/               # Analyzer process management           (headless)
+│   ├── layout/               # Deterministic placement               (headless)
+│   ├── renderer/             # raylib
+│   └── ui/                   # Dear ImGui
 ├── plugins/
-│   └── go-analyzer/          # Go analyzer plugin
-├── schemas/
-│   └── graph-v1.schema.json # Common graph contract (to be defined)
-├── fixtures/                 # Sample Go projects and expected graphs
-├── tests/
-├── flake.nix                 # Planned NixOS development/build environment
+│   └── go-analyzer/          # Go analyzer
+├── fixtures/                 # Sample Go module, golden and invalid snapshots
+├── docs/
+├── flake.nix                 # Pinned development environment
 └── README.md
 ```
 
-## 11. Technology Trade-offs
+Tests live next to the code they test.
 
-| Option | Assessment |
-| --- | --- |
-| **Odin + raylib + Dear ImGui** | First choice. Supports the learning objective and a lightweight native application. Validate raylib/ImGui integration early in a PoC. |
-| Rust + Bevy + egui | Strong ECS, language ecosystem, and type safety; an attractive alternative for long-term team development. |
-| C++ + Qt Quick 3D | Mature GUI and 3D integration, but with added complexity and Qt licensing considerations. |
-| Godot + C# | Good for rapidly prototyping rendering and interactions, but introduces substantial game-engine dependency. |
-| Zig + raylib / sokol | Lightweight with fine-grained control, but Odin better matches the motivation for this project. |
+## 11. Toolchain and Testing
 
-**Current decision:** Use Odin for the core and Go for the first analyzer. If high-level UI work, rendering performance, or NixOS compatibility turns out to be significantly more difficult than expected, reconsider the rendering layer.
+- **Pin everything.** Odin by release tag (releases are monthly and may break source compatibility), Go by the version in `go.mod`, and third-party Odin libraries as vendored copies at a recorded commit. Odin has no package manager. `flake.nix` is the planned place for the pins.
+- **The fixtures are the conformance suite.** The Go analyzer must reproduce the golden snapshots byte for byte. The Odin validator must accept every valid sample and reject every invalid one. Both sides are tested against the same files, which is what keeps producer and consumer from drifting.
+- **No JSON Schema file for now.** Nothing in the toolchain would validate against it, so it would drift from the code. The contract is prose plus fixtures until a tool consumes a schema.
+- **GUI verification is isolated.** Everything outside `renderer` and `ui` is tested offline and without a display.
 
-## 12. Technical Risks and Validation Questions
+## 12. Open Questions and Risks
 
-1. **Layout quality:** Will graph placement remain understandable as the number of nodes grows?
-2. **Cognitive load:** Could 3D make relationships harder to interpret? Compare against 2D alternatives.
-3. **Analysis accuracy:** Avoid presenting uncertain results as definite, particularly for interfaces, function values, and build tags.
-4. **Performance:** Benchmark node/edge counts, label rendering, searching, and hit testing.
-5. **Platform dependencies:** Test raylib/ImGui integration, NixOS/Wayland/X11, and graphics drivers.
-6. **Plugin security:** Consider untrusted plugin execution, external dependency downloads, and proprietary source code confidentiality.
-7. **Reproducibility:** Record analyzer versions, Git commits, and Go build conditions.
-8. **Schema evolution:** Treat the initial JSON format as experimental and formally version it when compatibility becomes a requirement.
+| # | Question | Resolved in |
+| --- | --- | --- |
+| 1 | Does raylib + Dear ImGui work reliably in Odin, including on NixOS under Wayland and X11 with the bundled raylib libraries? | Phase 1 |
+| 2 | Does 3D help or hurt compared with 2D, and what should the third axis mean? | Phase 1 |
+| 3 | Does the containment layout stay readable as node counts grow? | Phases 1 and 4 |
+| 4 | Should unknown fields in a record be ignored or rejected? | Phase 0 |
+| 5 | Does `scan` need its own executable without raylib, for machines with no graphics libraries? | When CI use becomes real |
+| 6 | Does the ID scheme hold on real code (vendoring, generics, embedding, several `init` functions)? | Phases 0 and 3 |
+| 7 | How should test files, several build configurations, and multi-module workspaces enter the model? | After the MVP |
+| 8 | When are `implements` edges and `inferred` candidates worth their noise? | Phase 5 |
+| 9 | Is process isolation enough for the analyzer, or is OS-level confinement needed? | After the MVP |
+
+**Reconsideration trigger:** If Phase 1 shows that UI work, rendering, or NixOS compatibility is significantly harder than expected, replace the rendering layer first (§8). The analyzer and the contract are unaffected.
 
 ## 13. MVP Definition of Done
 
-- [ ] The native Odin GUI launches locally.
-- [ ] A saved JSON graph can be loaded and explored in 3D.
-- [ ] Mouse controls work for the camera, and nodes can be selected.
-- [ ] Incoming/outgoing dependencies and source locations can be inspected for a selected node.
-- [ ] The Go analyzer plugin runs as a separate process.
-- [ ] Packages, imports, definitions, and direct calls can be extracted from a Go repository.
-- [ ] Relationships that cannot be resolved are not misrepresented as confirmed.
+- [ ] The native Odin viewer launches locally on Linux.
+- [ ] The Go analyzer runs as a separate process, with no network access and no cgo by default.
+- [ ] Packages, imports, declarations, and calls are extracted from a real Go module.
+- [ ] Analyzing the same input twice yields byte-identical snapshots.
+- [ ] The core rejects invalid snapshots and names the offending line.
+- [ ] A saved snapshot can be loaded and explored, with camera controls and node selection.
+- [ ] Incoming and outgoing dependencies and their source sites can be inspected for a selected node.
+- [ ] Interface calls and unresolved calls are visibly distinct from calls to concrete declarations.
+- [ ] A snapshot with error diagnostics is shown as incomplete.
 - [ ] `scan` and `view` can be used independently.
-- [ ] Viewing a snapshot works without an internet connection or browser, given locally available dependencies.
+- [ ] Viewing a snapshot needs no internet connection or browser.
 
-## 14. Design Principles at This Stage
+## 14. Design Principles
 
 1. **Source First:** Source code is authoritative; the graph is derived data.
-2. **Evidence First:** Preserve evidence and provenance for displayed dependencies.
-3. **Local First:** Do not require the web or cloud.
-4. **Language-Agnostic Core:** Keep language-specific semantic analysis in plugins.
-5. **Renderer Independence:** Do not mix 3D coordinates or UI styling into the graph model.
-6. **Progressive Disclosure:** Reveal details through exploration instead of displaying everything at once.
-7. **Small Core, Real Plugin:** Prioritize a working Go plugin over a fully generalized framework.
-8. **No False Certainty:** Distinguish static-analysis estimates from established facts.
+2. **Evidence First:** Every displayed relationship keeps its source sites.
+3. **Local First:** No web or cloud dependency.
+4. **Language-Agnostic Core:** Language-specific analysis lives in analyzers.
+5. **Renderer Independence:** No coordinates or styling in the graph model.
+6. **Deterministic Output:** Same input, same bytes; stable identities.
+7. **Progressive Disclosure:** Reveal detail through exploration, not all at once.
+8. **Small Core, Real Analyzer:** A working Go analyzer before any general framework.
+9. **No False Certainty:** Established, inferred, and unresolved are never mixed.
 
 ---
 
-**Next concrete step:** Build an Odin + raylib PoC that renders a fixed JSON graph in 3D and supports node selection. Then connect an out-of-process Go Analyzer.
+**Next concrete step:** Phase 0 — write the v0 contract document and build the thin Go analyzer that emits the package import graph.
