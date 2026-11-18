@@ -185,7 +185,7 @@ Because the analyzer needs nothing but arguments, it can be run and tested by ha
 - Enforce a timeout and kill the analyzer when it expires.
 - Read stdout and stderr concurrently, so that a full pipe cannot block the analyzer.
 - Never block the UI thread on analysis.
-- Enforce limits on line length, record count, and total size.
+- Enforce the input limits of the contract ([contract.md](contract.md#limits)).
 - Treat a non-zero exit code, a timeout, or a truncated stream as a failed analysis. A failed analysis produces no snapshot.
 
 ### Security
@@ -197,108 +197,17 @@ Analysis targets may contain proprietary source code and may themselves be untru
 
 > A separate process gives fault isolation; it is **not** an operating-system sandbox. Filesystem and network confinement would need additional controls.
 
-## 6. Graph Contract v0
+## 6. Graph Contract
 
-`schema_version` is `0`: experimental, with no compatibility promise. Readers reject every version they do not know. While the version is `0`, any change to the contract updates the analyzer, the core, the fixtures, and the tests in the same change. The version becomes `1` when compatibility is first promised.
+The analyzer's output and saved snapshots share one versioned format, specified in [contract.md](contract.md). Its main decisions:
 
-### Records
-
-| Record | Purpose |
-| --- | --- |
-| `header` | First record. Schema version, analyzer name and version, analysis context. |
-| `node` | A package, type, interface, function, or method. |
-| `edge` | A relationship between two nodes, with evidence. |
-| `diagnostic` | Something the analyzer could not load or type-check. |
-| `complete` | Last record. Record counts, used to detect truncation. |
-
-### Nodes
-
-- `kind` is one of `package`, `type`, `interface`, `function`, `method`. `interface` is separate from `type` because calls to its methods do not identify the code that runs.
-- `parent` forms a single **containment tree**: package → type or function, type → method. Packages have no parent.
-- Files are not nodes. Every declaration carries its file in `loc`, and the viewer can group by file from that.
-- Grouping packages by directory is derived in the core from their paths; analyzers do not emit it.
-- `external: true` marks a node outside the analyzed module (§7).
-
-### Edges
-
-- `kind` is `imports` (package → package) or `calls` (function or method → function or method).
-- An edge is identified by (`kind`, `source`, `target`). Repeated occurrences are merged into one edge whose `sites` list every supporting location. Duplicate edges are invalid.
-- Every edge has at least one site.
-- Edges between collapsed groups are **derived in the core** from the edges of their descendants. Analyzers never emit aggregates.
-
-### Certainty
-
-Every edge carries one of three values. There are no numeric confidence scores.
-
-| Value | Meaning | Emitted in the MVP |
-| --- | --- | --- |
-| `established` | A fact of the source under the recorded build configuration, proven by the type checker. | Yes |
-| `unresolved` | The relationship exists, but its target cannot be named. The edge has no `target`. | Yes |
-| `inferred` | Produced by an approximation, such as a candidate implementation of an interface method. | No (reserved) |
-
-Evidence observed at run time, if ever added, gets its own value. It is never folded into these.
-
-### Identity
-
-Node IDs are stable across commits as long as the declaration keeps its package, receiver, and name.
-
-| Node | ID |
-| --- | --- |
-| Package | `go:<import path>` |
-| Type, interface, function | `go:<import path>#<Name>` |
-| Method | `go:<import path>#<Type>.<Method>` |
-
-- IDs never contain line numbers, file paths of ordinary declarations, or build configuration.
-- Generic declarations use the uninstantiated declaration.
-- Methods use the type that declares them, including methods reached through embedding.
-- `init` functions are the exception to the file-path rule, because a package may have several: `go:<import path>#init@<file name>`, with an ordinal suffix when one file has more than one.
-- Declarations named `_`, types declared inside functions, and function literals are not nodes. Calls made inside a function literal belong to the enclosing declaration.
-- Duplicate IDs are invalid, so a flaw in this scheme fails loudly rather than silently merging nodes.
-
-### Locations
-
-- `file` is relative to the analyzed root directory, uses `/`, and contains no `..`. Snapshots never contain absolute paths.
-- `line` and `col` are 1-based. `col` counts bytes, as `go/token` does.
-- External nodes have no `loc`: their files live outside the root, at machine-specific paths.
-
-### Determinism
-
-The same input and configuration produce byte-identical output.
-
-- Nodes are sorted by `id`. Edges are sorted by (`source`, `kind`, `target`), with absent targets first. Sites are sorted by (`file`, `line`, `col`). All comparisons are bytewise.
-- Snapshots contain no timestamps, host names, or absolute paths.
-- A VCS revision is optional, and must not be recorded for a working tree that does not match it.
-
-### Illustrative Example
-
-```jsonl
-{"type":"header","schema_version":0,"analyzer":{"name":"go","version":"0.0.0"},"context":{"module":"example.com/app","goos":"linux","goarch":"amd64","cgo_enabled":false,"build_tags":[]}}
-{"type":"node","id":"go:example.com/app/handler","kind":"package","name":"handler"}
-{"type":"node","id":"go:example.com/app/handler#GetUser","kind":"function","name":"GetUser","parent":"go:example.com/app/handler","loc":{"file":"handler/user.go","line":42,"col":6}}
-{"type":"node","id":"go:example.com/app/service","kind":"package","name":"service"}
-{"type":"node","id":"go:example.com/app/service#Store","kind":"interface","name":"Store","parent":"go:example.com/app/service","loc":{"file":"service/store.go","line":9,"col":6}}
-{"type":"node","id":"go:example.com/app/service#Store.Find","kind":"method","name":"Find","parent":"go:example.com/app/service#Store","loc":{"file":"service/store.go","line":10,"col":2}}
-{"type":"node","id":"go:fmt","kind":"package","name":"fmt","external":true}
-{"type":"edge","kind":"imports","source":"go:example.com/app/handler","target":"go:example.com/app/service","certainty":"established","sites":[{"file":"handler/user.go","line":6,"col":2}]}
-{"type":"edge","kind":"calls","source":"go:example.com/app/handler#GetUser","certainty":"unresolved","sites":[{"file":"handler/user.go","line":51,"col":9}]}
-{"type":"edge","kind":"calls","source":"go:example.com/app/handler#GetUser","target":"go:example.com/app/service#Store.Find","certainty":"established","sites":[{"file":"handler/user.go","line":43,"col":14}]}
-{"type":"complete","nodes":6,"edges":3,"diagnostics":0}
-```
-
-Field names and the exact field set are fixed in Phase 0, in a dedicated contract document.
-
-### Validation in the Core
-
-The core rejects a snapshot, naming the offending line, when it finds:
-
-- an unknown `schema_version`, a missing `header` or `complete`, or counts that do not match;
-- an unknown record type, kind, or certainty value;
-- a duplicate node ID or duplicate edge;
-- a `parent`, `source`, or `target` that names no node, or a cycle in `parent`;
-- an edge without `target` whose certainty is not `unresolved`, or the reverse;
-- an absolute path, a path containing `..`, or a record over the size limits.
-
-A snapshot that contains error diagnostics is valid, but the viewer must show that the analysis was incomplete.
+- Records are JSON Lines: one `header`, the `node` records, the `edge` records, the `diagnostic` records, and one `complete` whose counts expose truncation.
+- Nodes form one containment tree: package → type, interface, or function; type or interface → method. Files are not nodes; declarations carry their file and position.
+- Edges are `imports` and `calls`. One edge merges every occurrence of a relationship and lists each one as a site, so every relationship keeps its evidence.
+- Every edge has a certainty: `established` (proven by the type checker) or `unresolved` (the relationship exists, but its target cannot be named). `inferred` is reserved for approximations. There are no numeric confidence scores.
+- Node IDs stay the same across commits as long as a declaration keeps its package, receiver, and name.
+- Output is deterministic and machine-independent: sorted records, no timestamps, no absolute paths.
+- The core validates every record strictly, including unknown and duplicate keys, and rejects an invalid stream with the offending line. A snapshot with error diagnostics is valid, but the viewer shows it as incomplete.
 
 ### Core Responsibilities
 
@@ -325,7 +234,7 @@ A snapshot that contains error diagnostics is valid, but the viewer must show th
 - Load the module that contains the given directory, with the pattern `./...`.
 - Use one build configuration per run: the host's `GOOS` and `GOARCH` and no extra build tags, unless flags say otherwise. The effective configuration is recorded in the header.
 - Exclude test files.
-- Run the `go` command with `GOPROXY=off`, `GOTOOLCHAIN=local`, and `CGO_ENABLED=0`. Only an explicit flag relaxes them, and the header records the effective values.
+- Run the `go` command with `GOPROXY=off`, `GOTOOLCHAIN=local`, and `CGO_ENABLED=0`. Only an explicit flag relaxes them, and the header records whether downloads and cgo were allowed ([contract.md](contract.md#root-and-context)).
   - `GOPROXY=off`: a dependency missing from the local module cache becomes a diagnostic, not a download.
   - `GOTOOLCHAIN=local`: a `go.mod` that asks for another toolchain becomes a diagnostic, not a toolchain download.
   - `CGO_ENABLED=0`: cgo and the C compiler are never invoked. Files that import `"C"` are excluded from the graph.
@@ -412,7 +321,7 @@ So raylib with ImGui requires a custom or community `rlgl` backend, and that int
 
 ### Phase 0 — Contract and Real Data
 
-- Write the v0 contract document from §6.
+- Write the v0 contract document ([contract.md](contract.md)). Done.
 - Build a thin Go analyzer that emits packages and `imports` edges only, deterministically.
 - Add a small Go module as a fixture, with a golden snapshot, plus valid and invalid snapshot samples.
 - Generate snapshots of one or two real, mid-sized open-source Go projects for viewer evaluation. They are generated locally and not committed.
@@ -497,12 +406,11 @@ Tests live next to the code they test.
 | 1 | Does raylib + Dear ImGui work reliably in Odin on NixOS, under Wayland and X11, with nixpkgs' raylib and GLFW? | Phase 1 |
 | 2 | Does 3D help or hurt compared with 2D, and what should the third axis mean? | Phase 1 |
 | 3 | Does the containment layout stay readable as node counts grow? | Phases 1 and 4 |
-| 4 | Should unknown fields in a record be ignored or rejected? | Phase 0 |
-| 5 | Does `scan` need its own executable without raylib, for machines with no graphics libraries? | When CI use becomes real |
-| 6 | Does the ID scheme hold on real code (vendoring, generics, embedding, several `init` functions)? | Phases 0 and 3 |
-| 7 | How should test files, several build configurations, and multi-module workspaces enter the model? | After the MVP |
-| 8 | When are `implements` edges and `inferred` candidates worth their noise? | Phase 5 |
-| 9 | Is process isolation enough for the analyzer, or is OS-level confinement needed? | After the MVP |
+| 4 | Does `scan` need its own executable without raylib, for machines with no graphics libraries? | When CI use becomes real |
+| 5 | Does the ID scheme hold on real code (vendoring, generics, embedding, several `init` functions)? | Phases 0 and 3 |
+| 6 | How should test files, several build configurations, and multi-module workspaces enter the model? | After the MVP |
+| 7 | When are `implements` edges and `inferred` candidates worth their noise? | Phase 5 |
+| 8 | Is process isolation enough for the analyzer, or is OS-level confinement needed? | After the MVP |
 
 **Reconsideration trigger:** If Phase 1 shows that UI work, rendering, or NixOS compatibility is significantly harder than expected, replace the rendering layer first (§8). The analyzer and the contract are unaffected.
 
@@ -534,4 +442,4 @@ Tests live next to the code they test.
 
 ---
 
-**Next concrete step:** Phase 0 — write the v0 contract document and build the thin Go analyzer that emits the package import graph.
+**Next concrete step:** Phase 0 — build the thin Go analyzer that emits the package import graph, with its fixture module and golden snapshot.
