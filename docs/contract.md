@@ -2,7 +2,7 @@
 
 This document defines the record stream that an analyzer writes and the core reads. The same stream is both the analyzer's standard output and the content of a saved snapshot. How the core starts the analyzer, and what stderr and the exit status mean, is described in [initial-plan.md §5](initial-plan.md#5-analyzer-integration).
 
-`schema_version` is `0`: experimental, with no compatibility promise. Readers reject every other version. Any change to this document changes the analyzer, the core, the fixtures, and the tests in the same commit. The version becomes `1` when compatibility is first promised.
+`schema_version` is `0`: experimental, with no compatibility promise. Readers reject every other version. Any change to this document changes the analyzer, the core, the fixtures, and the tests in the same change. The version becomes `1` when compatibility is first promised.
 
 ## Stream
 
