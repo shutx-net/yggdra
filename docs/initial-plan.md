@@ -402,7 +402,7 @@ Showing every node at once does not help anyone understand a large codebase. The
 
 Facts checked in November 2026 against Odin `dev-2026-11`:
 
-- `vendor:raylib` binds raylib 6.2 and includes `rlgl` and `raygui`. It links the libraries bundled with the Odin distribution.
+- `vendor:raylib` binds raylib 6.2 and includes `rlgl` and `raygui`. The upstream distribution bundles prebuilt raylib libraries, but nixpkgs' Odin deletes them and links the system raylib instead. The dev shell therefore links nixpkgs' raylib 6.2, built on nixpkgs' GLFW 3.4 ([development.md](development.md)).
 - Dear ImGui is not in `vendor`. The third-party `odin-imgui` bindings cover GLFW, SDL2, SDL3, OpenGL 3, and other backends, but **not raylib**, and building them needs clang and Python.
 - `vendor:microui` and `raygui` exist, but do not cover the trees, tables, and text input this UI needs.
 
@@ -462,7 +462,7 @@ Real data comes first because layout decisions made on a hand-written toy graph 
 
 ## 10. Proposed Repository Layout
 
-Nothing here exists yet except `docs/`.
+Only `docs/` and the Nix flake exist so far.
 
 ```text
 yggdra/
@@ -485,7 +485,7 @@ Tests live next to the code they test.
 
 ## 11. Toolchain and Testing
 
-- **Pin everything.** Odin by release tag (releases are monthly and may break source compatibility), Go by the version in `go.mod`, and third-party Odin libraries as vendored copies at a recorded commit. Odin has no package manager. `flake.nix` is the planned place for the pins.
+- **Pin everything.** The Nix flake pins the toolchain: Go's minor version in `flake.nix`, and Odin, raylib, and the other tools through the nixpkgs revision in `flake.lock` ([development.md](development.md)). Odin releases are monthly and may break source compatibility, so a lock update is a deliberate change. `go.mod` states the same Go version. Odin has no package manager, so third-party Odin libraries are vendored copies at a recorded commit.
 - **The fixtures are the conformance suite.** The Go analyzer must reproduce the golden snapshots byte for byte. The Odin validator must accept every valid sample and reject every invalid one. Both sides are tested against the same files, which is what keeps producer and consumer from drifting.
 - **No JSON Schema file for now.** Nothing in the toolchain would validate against it, so it would drift from the code. The contract is prose plus fixtures until a tool consumes a schema.
 - **GUI verification is isolated.** Everything outside `renderer` and `ui` is tested offline and without a display.
@@ -494,7 +494,7 @@ Tests live next to the code they test.
 
 | # | Question | Resolved in |
 | --- | --- | --- |
-| 1 | Does raylib + Dear ImGui work reliably in Odin, including on NixOS under Wayland and X11 with the bundled raylib libraries? | Phase 1 |
+| 1 | Does raylib + Dear ImGui work reliably in Odin on NixOS, under Wayland and X11, with nixpkgs' raylib and GLFW? | Phase 1 |
 | 2 | Does 3D help or hurt compared with 2D, and what should the third axis mean? | Phase 1 |
 | 3 | Does the containment layout stay readable as node counts grow? | Phases 1 and 4 |
 | 4 | Should unknown fields in a record be ignored or rejected? | Phase 0 |
