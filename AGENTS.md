@@ -33,5 +33,6 @@ These instructions apply to the entire repository. Keep this file short and repo
 Package-specific instructions belong in separate documents, **not** in this file. Add Markdown links here as those documents are created, and read the relevant documents before editing their components.
 
 - [Development environment](docs/development.md): the Nix dev shell, how tool versions are pinned, and the checks to run after changing the flake.
+- [Graph contract](docs/contract.md): the record stream analyzers write and the core reads. Read it before changing either side.
 
 <!-- Add links to existing documentation here, e.g. - [Graph model](docs/graph.md). Do not add broken links. -->
